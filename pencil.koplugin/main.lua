@@ -1007,6 +1007,8 @@ function Pencil:loadSettings()
     local settings = G_reader_settings:readSetting("pencil_annotation_settings") or {}
     -- Always start with pencil tool when opening a book
     self.current_tool = TOOL_PEN
+    -- UI language ("en" default; "vi" overlays Vietnamese strings)
+    self.language = settings.language or "en"
     -- Input debug mode: log all input details
     self.input_debug_mode = settings.input_debug_mode or false
     -- Experimental features
@@ -1052,6 +1054,167 @@ function Pencil:saveSettings()
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
         swap_eraser_and_highlighter = self.swap_eraser_and_highlighter,
         pen_width = self.tool_settings[TOOL_PEN].width,
+        language = self.language,
+    })
+end
+
+--[[- Bilingual UI (EN/VI).
+The plugin ships English strings through gettext (_); we keep those as keys and
+overlay a Vietnamese table when the user picks Tiếng Việt in the menu.
+Missing keys fall back to English, so partial translations stay safe.
+]]
+local VI_STRINGS = {
+    ["Pencil"] = "Bút chì",
+    ["Enabled"] = "Bật",
+    ["Swap Eraser and Highlighter"] = "Đổi vai Tẩy / Bút nhấn sáng",
+    ["Tool"] = "Công cụ",
+    ["Select pencil or eraser."] = "Chọn bút chì hoặc tẩy.",
+    ["pencil"] = "bút chì",
+    ["eraser"] = "tẩy",
+    ["Undo last stroke"] = "Hoàn tác nét vừa vẽ",
+    ["Clear page strokes"] = "Xoá nét trang hiện tại",
+    ["Clear all strokes"] = "Xoá mọi nét trong sách",
+    ["Export annotated PDF"] = "Xuất PDF có nét vẽ",
+    ["Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader."] = "Tạo bản sao PDF với mọi nét vẽ ghi thành ink annotation PDF thật. Chia sẻ mở bằng trình đọc PDF nào cũng thấy.",
+    ["Language"] = "Ngôn ngữ",
+    ["Exported: %1"] = "Đã xuất: %1",
+    ["Export failed (see crash.log)"] = "Xuất thất bại (xem crash.log)",
+    ["Only PDF documents can be exported."] = "Chỉ xuất được cho tài liệu PDF.",
+    ["No strokes to export."] = "Không có nét nào để xuất.",
+}
+
+function Pencil:tr(s)
+    if self.language == "vi" then
+        return VI_STRINGS[s] or s
+    end
+    return s
+end
+
+-- Extract 0-255 r/g/b from a Blitbuffer color (ColorRGB32 has .r/.g/.b
+-- cdata fields, Color8 only .a; wrong-field access on cdata raises, so pcall).
+local function pencilGetRGB(color)
+    if not color then return 0, 0, 0 end
+    local ok, r, g, b = pcall(function() return color.r, color.g, color.b end)
+    if ok and r then return r, g, b end
+    local ok2, a = pcall(function() return color.a end)
+    if ok2 and a then return a, a, a end
+    return 0, 0, 0
+end
+
+-- Copy a binary file (Lua has no builtin; 64 KiB chunks).
+local function pencilCopyFile(src, dst)
+    local fin = io.open(src, "rb")
+    if not fin then return false end
+    local fout = io.open(dst, "wb")
+    if not fout then fin:close() return false end
+    while true do
+        local block = fin:read(65536)
+        if not block then break end
+        fout:write(block)
+    end
+    fin:close()
+    return fout:close() ~= nil
+end
+
+--[[--
+Export all saved strokes as real PDF ink annotations.
+
+Opens a *copy* of the source PDF through DocumentRegistry (a second
+PdfDocument instance — the one being read is never touched), burns each
+stroke group in with MuPDF's addInkAnnotation, and lets PdfDocument:close()
+write the result back to the copy via the is_edited flag.
+
+Coordinate mapping: strokes are stored in screen coordinates captured at draw
+time (plugin invariant: zoom/rotation must not change after drawing). We map
+screen -> page with the current ReaderView transform:
+  page_pt = screen_pt + origin, where origin = screenToPageTransform(0,0)
+  pdf_pt  = page_pt / zoom
+Ink width and opacity are scaled the same way (width/zoom, alpha/255).
+Known limitation: pages with a non-zero /Rotate flag may come out rotated
+wrong — MuPDF renders /Rotate into the bitmap but ink annotation coordinates
+are in native (pre-rotate) page space.
+]]
+function Pencil:exportAnnotatedPdf()
+    if not self.ui.paging then
+        UIManager:show(InfoMessage:new{ text = self:tr("Only PDF documents can be exported."), timeout = 2 })
+        return
+    end
+    if #self.strokes == 0 then
+        UIManager:show(InfoMessage:new{ text = self:tr("No strokes to export."), timeout = 2 })
+        return
+    end
+
+    local src = self.ui.document.file
+    local base = src:gsub("%.pdf$", "")
+    local out = base .. "-annotated.pdf"
+
+    if not pencilCopyFile(src, out) then
+        logger.warn("Pencil: export failed to copy", src, "->", out)
+        UIManager:show(InfoMessage:new{ text = self:tr("Export failed (see crash.log)"), timeout = 2 })
+        return
+    end
+
+    local DocumentRegistry = require("document/documentregistry")
+    local ok_doc, doc = pcall(DocumentRegistry.openDocument, DocumentRegistry, out)
+    if not ok_doc or not doc or not doc._document then
+        logger.warn("Pencil: export could not open copy", out)
+        UIManager:show(InfoMessage:new{ text = self:tr("Export failed (see crash.log)"), timeout = 2 })
+        return
+    end
+
+    local zoom = self.ui.view.state.zoom or 1
+    local origin = self.ui.view:screenToPageTransform({ x = 0, y = 0 }) or { x = 0, y = 0 }
+
+    local pages_done, pages_skipped = 0, 0
+    for pageno, page_stroke_list in pairs(self.page_strokes) do
+        if type(pageno) == "number" and #page_stroke_list > 0 then
+            local ok_page, page = pcall(doc._document.openPage, doc._document, pageno)
+            if ok_page and page then
+                -- addInkAnnotation takes { { {x=,y=}, ... }, ... }: outer list
+                -- = separate strokes (each rendered as its own ink path).
+                local ink_strokes = {}
+                local meta = {}
+                for _, idx in ipairs(page_stroke_list) do
+                    local stroke = self.strokes[idx]
+                    if stroke and stroke.points and #stroke.points > 0 then
+                        local pts = {}
+                        for _, pt in ipairs(stroke.points) do
+                            table.insert(pts, {
+                                x = (pt.x + origin.x) / zoom,
+                                y = (pt.y + origin.y) / zoom,
+                            })
+                        end
+                        table.insert(ink_strokes, pts)
+                        local r, g, b = pencilGetRGB(stroke.color)
+                        table.insert(meta, {
+                            r = r, g = g, b = b,
+                            width = (stroke.width or 3) / zoom,
+                            opacity = stroke.tool == TOOL_HIGHLIGHTER
+                                and (stroke.alpha or 128) / 255 or 1.0,
+                        })
+                    end
+                end
+                -- One ink annotation per stroke: per-stroke color/width/opacity.
+                for i = 1, #ink_strokes do
+                    local m = meta[i]
+                    pcall(page.addInkAnnotation, page, { ink_strokes[i] },
+                        { r = m.r, g = m.g, b = m.b }, m.width, m.opacity)
+                end
+                page:close()
+                pages_done = pages_done + 1
+            else
+                pages_skipped = pages_skipped + 1
+            end
+        end
+    end
+
+    doc.is_edited = true -- PdfDocument:close() -> writeDocument(out)
+    pcall(function() doc:close() end)
+
+    logger.info("Pencil: exported", pages_done, "pages ->", out, "skipped:", pages_skipped)
+    UIManager:show(InfoMessage:new{
+        text = T(self:tr("Exported: %1"), out),
+        timeout = 4,
     })
 end
 
@@ -1164,6 +1327,38 @@ function Pencil:addToMainMenu(menu_items)
                 enabled_func = function()
                     return #self.strokes > 0
                 end,
+            },
+            {
+                text = _("Export annotated PDF"),
+                help_text = _("Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader."),
+                enabled_func = function()
+                    return self.ui.paging ~= nil and #self.strokes > 0
+                end,
+                callback = function()
+                    self:exportAnnotatedPdf()
+                end,
+                separator = true,
+            },
+            {
+                text = _("Language"),
+                sub_item_table = {
+                    {
+                        text = "English",
+                        checked_func = function() return self.language ~= "vi" end,
+                        callback = function()
+                            self.language = "en"
+                            self:saveSettings()
+                        end,
+                    },
+                    {
+                        text = "Tiếng Việt",
+                        checked_func = function() return self.language == "vi" end,
+                        callback = function()
+                            self.language = "vi"
+                            self:saveSettings()
+                        end,
+                    },
+                },
             },
             {
                 text_func = function()
