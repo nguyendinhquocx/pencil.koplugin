@@ -337,7 +337,13 @@ end
 
 -- Transform stylus coordinates based on screen rotation
 -- Raw stylus coordinates are in hardware space; framebuffer expects logical (rotated) space
+-- Android/SDL exception: those input backends already deliver pointer coordinates in the
+-- logical (rotated) screen space, so re-applying the rotation here would skew every
+-- stroke as soon as the screen is not in the default orientation.
 function Pencil:transformCoordinates(x, y)
+    if Device:isAndroid() or Device:isSDL() then
+        return x, y
+    end
     local rotation = Screen:getRotationMode()
     return PencilGeometry.transformForRotation(x, y, rotation, Screen:getWidth(), Screen:getHeight())
 end
@@ -366,6 +372,17 @@ function Pencil:handleStylusSlot(input, slot)
     -- This handles the timing issue where stylus callback fires before key events
     if ((self.swap_eraser_and_highlighter and slot.tool == TOOL_TYPE_HIGHLIGHTER) or (not self.swap_eraser_and_highlighter and slot.tool == TOOL_TYPE_ERASER)) and not self.eraser_button_active then
         logger.info("Pencil: Eraser end detected via slot.tool, activating eraser mode")
+        -- The barrel button often kicks in a few points after pen-down (user
+        -- presses it mid-stroke, typical on Android/S Pen). The in-progress
+        -- stroke has already been painted to the framebuffer; dropping
+        -- current_stroke without ending it would leave those pixels as
+        -- un-erasable framebuffer ghosts (visible but not in stroke data, so
+        -- eraseAtPoint never matches them until an unrelated repaint).
+        -- Close the stroke out so it becomes real, erasable data instead.
+        if self.current_stroke then
+            self:endRawStroke()
+        end
+        self.pen_down = false
         self.eraser_button_active = true
         self.eraser_button_deleted = {}
     elseif ((self.swap_eraser_and_highlighter and not (slot.tool == TOOL_TYPE_HIGHLIGHTER)) or (not self.swap_eraser_and_highlighter and not (slot.tool == TOOL_TYPE_ERASER))) and self.eraser_button_active then

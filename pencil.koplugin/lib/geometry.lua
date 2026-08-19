@@ -9,6 +9,9 @@ local Geometry = {}
 
 --- Check if a point is near any point in a stroke.
 -- Uses squared distance comparison to avoid sqrt for performance.
+-- Fast-reject via a cached bounding box so erasing stays O(strokes-on-page)
+-- instead of O(total-points) — critical on fast Android touch digitizers
+-- (120Hz) where eraseAtPoint runs on every eraser move event.
 -- @param px X coordinate of point to check
 -- @param py Y coordinate of point to check
 -- @param stroke Table with points array
@@ -21,6 +24,28 @@ function Geometry.isPointNearStroke(px, py, stroke, threshold)
 
     threshold = threshold or 20
     local threshold_sq = threshold * threshold
+
+    -- Bounding-box prefilter: cache on the stroke (strokes are immutable once
+    -- in self.strokes). Any point within `threshold` of a stroke point is by
+    -- definition inside bbox+threshold, so rejecting outside it is exact.
+    local bbox = stroke._bbox
+    if not bbox then
+        local p = stroke.points[1]
+        local x0, y0, x1, y1 = p.x, p.y, p.x, p.y
+        for i = 2, #stroke.points do
+            p = stroke.points[i]
+            if p.x < x0 then x0 = p.x end
+            if p.y < y0 then y0 = p.y end
+            if p.x > x1 then x1 = p.x end
+            if p.y > y1 then y1 = p.y end
+        end
+        bbox = { x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
+        stroke._bbox = bbox
+    end
+    if px < (bbox.x0 - threshold) or px > (bbox.x1 + threshold)
+        or py < (bbox.y0 - threshold) or py > (bbox.y1 + threshold) then
+        return false
+    end
 
     for _, point in ipairs(stroke.points) do
         local dx = px - point.x
