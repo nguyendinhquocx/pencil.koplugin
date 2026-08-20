@@ -663,13 +663,19 @@ function Pencil:startRawStroke(first_x, first_y)
     -- off_x/off_y = screen position of the page's (0,0) at this moment.
     local zoom = 1
     local off_x, off_y = 0, 0
+    local rotation
     if self.ui and self.ui.view and self.ui.view.state then
         zoom = self.ui.view.state.zoom or 1
+        rotation = self.ui.view.state.rotation
     end
     if first_x and first_y and self.ui and self.ui.view
             and self.ui.view.screenToPageTransform then
         local pp = self.ui.view:screenToPageTransform({ x = first_x, y = first_y })
         if pp then
+            -- pp carries the exact zoom/rotation of the page-state the pen
+            -- point landed on (scroll mode keeps one per visible page).
+            zoom = pp.zoom or zoom
+            rotation = pp.rotation or rotation
             off_x = first_x - pp.x * zoom
             off_y = first_y - pp.y * zoom
         end
@@ -687,6 +693,7 @@ function Pencil:startRawStroke(first_x, first_y)
         zoom = zoom,
         off_x = off_x,
         off_y = off_y,
+        rotation = rotation,
     }
     self.last_refresh_time = time.now()
     self.dirty_region = nil  -- Clear any pending dirty region
@@ -4108,6 +4115,35 @@ function Pencil:eraseAtPoint(x, y, page)
     return nil
 end
 
+-- Render a stroke mapped from its captured page-space into the CURRENT
+-- screen transform of a visible page. Keeps notes glued to page content while
+-- scrolling/zooming instead of floating at stale screen coordinates.
+-- vp = { page, ox, oy, zoom, rotation } where (ox, oy) is the current screen
+-- position of page (0,0): screen = (pt - off_saved) * (zoom_now/zoom_saved) + origin_now.
+-- Falls back to raw screen coordinates for legacy strokes (captured before
+-- view-state existed) and for rotation mismatches (handled by the stale-group
+-- badge machinery in paintTo).
+function Pencil:renderStrokeMapped(bb, stroke, vp)
+    if not stroke.zoom or stroke.rotation == nil
+            or stroke.rotation ~= vp.rotation then
+        return self:renderStroke(bb, stroke)
+    end
+    local scale = vp.zoom / stroke.zoom
+    local off_x, off_y = stroke.off_x or 0, stroke.off_y or 0
+    local pts = {}
+    for i, pt in ipairs(stroke.points) do
+        pts[i] = {
+            x = (pt.x - off_x) * scale + vp.ox,
+            y = (pt.y - off_y) * scale + vp.oy,
+        }
+    end
+    local s = {}
+    for k, v in pairs(stroke) do s[k] = v end
+    s.points = pts
+    s.width = stroke.width * scale
+    self:renderStroke(bb, s)
+end
+
 -- Render a complete stroke
 function Pencil:renderStroke(bb, stroke)
     if not stroke.points or #stroke.points < 1 then
@@ -4232,13 +4268,56 @@ function Pencil:paintTo(bb, x, y)
         }
     end
 
-    -- Render saved strokes for current page (skipping stale ones).
-    local indices = self.page_strokes[page] or {}
-    for _, idx in ipairs(indices) do
-        if not (stale_indices and stale_indices[idx]) then
-            local stroke = self.strokes[idx]
-            if stroke then
-                self:renderStroke(bb, stroke)
+    -- Render saved strokes for EVERY page currently visible, mapped from the
+    -- page-space captured at draw time into the current screen transform.
+    -- (Scroll mode shows several pages at once; the old code painted only the
+    -- "current" page and reused raw draw-time screen coordinates, so notes
+    -- drifted onto neighbouring pages after scrolling or reopening the book.)
+    local visible_pages
+    if self.ui.paging and self.ui.view.page_scroll and self.ui.view.page_states then
+        visible_pages = {}
+        for _, st in ipairs(self.ui.view.page_states) do
+            table.insert(visible_pages, {
+                page = st.page,
+                ox = st.offset.x - st.visible_area.x,
+                oy = st.offset.y - st.visible_area.y,
+                zoom = st.zoom,
+                rotation = st.rotation,
+            })
+        end
+    elseif self.ui.view.state then
+        local st = self.ui.view.state
+        visible_pages = { {
+            page = page,
+            ox = st.offset.x - self.ui.view.visible_area.x,
+            oy = st.offset.y - self.ui.view.visible_area.y,
+            zoom = st.zoom,
+            rotation = st.rotation,
+        } }
+    end
+    if visible_pages then
+        for _, vp in ipairs(visible_pages) do
+            local indices = self.page_strokes[vp.page] or {}
+            for _, idx in ipairs(indices) do
+                -- Stale-skip logic only applies to the current page (groups
+                -- were evaluated against it above); other visible pages
+                -- render mapped, which is position-correct by construction.
+                if vp.page ~= page or not (stale_indices and stale_indices[idx]) then
+                    local stroke = self.strokes[idx]
+                    if stroke then
+                        self:renderStrokeMapped(bb, stroke, vp)
+                    end
+                end
+            end
+        end
+    else
+        local indices = self.page_strokes[page] or {}
+        for _, idx in ipairs(indices) do
+            if not (stale_indices and stale_indices[idx]) then
+                local stroke = self.strokes[idx]
+                if stroke then
+                    self:renderStroke(bb, stroke)
+                end
             end
         end
     end
@@ -4350,6 +4429,7 @@ function Pencil:strokeToSaveable(stroke)
         zoom = stroke.zoom,
         off_x = stroke.off_x,
         off_y = stroke.off_y,
+        rotation = stroke.rotation,
         points = stroke.points,
         color_name = stroke.color_name,  -- Save color name for persistence
     }
@@ -4382,6 +4462,7 @@ function Pencil:strokeFromSaved(saved)
         zoom = saved.zoom,
         off_x = saved.off_x,
         off_y = saved.off_y,
+        rotation = saved.rotation,
         points = saved.points,
     }
 end
