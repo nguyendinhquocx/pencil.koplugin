@@ -212,31 +212,31 @@ function Pencil:init()
     Dispatcher:registerAction("pencil_toggle_tool", {
         category = "none",
         event = "PencilToggleTool",
-        title = _("Pencil: toggle pencil/eraser"),
+        title = self:tr(_("Pencil: toggle pencil/eraser")),
         reader = true,
     })
     Dispatcher:registerAction("pencil_toggle_enabled", {
         category = "none",
         event = "PencilToggleEnabled",
-        title = _("Pencil: toggle on/off"),
+        title = self:tr(_("Pencil: toggle on/off")),
         reader = true,
     })
     Dispatcher:registerAction("pencil_select_pen", {
         category = "none",
         event = "PencilSelectPen",
-        title = _("Pencil: select pencil"),
+        title = self:tr(_("Pencil: select pencil")),
         reader = true,
     })
     Dispatcher:registerAction("pencil_select_eraser", {
         category = "none",
         event = "PencilSelectEraser",
-        title = _("Pencil: select eraser"),
+        title = self:tr(_("Pencil: select eraser")),
         reader = true,
     })
     Dispatcher:registerAction("pencil_undo", {
         category = "none",
         event = "PencilUndo",
-        title = _("Pencil: undo"),
+        title = self:tr(_("Pencil: undo")),
         reader = true,
         separator = true,
     })
@@ -260,9 +260,9 @@ function Pencil:onPencilToggleTool()
     else
         self.current_tool = TOOL_ERASER
     end
-    local display_name = self.current_tool == TOOL_PEN and _("pencil") or _("eraser")
+    local display_name = self.current_tool == TOOL_PEN and self:tr(_("pencil")) or self:tr(_("eraser"))
     UIManager:show(InfoMessage:new{
-        text = T(_("Tool: %1"), display_name),
+        text = T(self:tr(_("Tool: %1")), display_name),
         timeout = 1,
     })
     return true
@@ -274,13 +274,13 @@ function Pencil:onPencilToggleEnabled()
     if self:isEnabled() then
         self:setupPenInput()
         UIManager:show(InfoMessage:new{
-            text = _("Pencil enabled"),
+            text = self:tr(_("Pencil enabled")),
             timeout = 1,
         })
     else
         self:teardownPenInput()
         UIManager:show(InfoMessage:new{
-            text = _("Pencil disabled"),
+            text = self:tr(_("Pencil disabled")),
             timeout = 1,
         })
     end
@@ -290,7 +290,7 @@ end
 function Pencil:onPencilSelectPen()
     self.current_tool = TOOL_PEN
     UIManager:show(InfoMessage:new{
-        text = _("Pencil tool: pencil"),
+        text = self:tr(_("Pencil tool: pencil")),
         timeout = 1,
     })
     return true
@@ -299,7 +299,7 @@ end
 function Pencil:onPencilSelectEraser()
     self.current_tool = TOOL_ERASER
     UIManager:show(InfoMessage:new{
-        text = _("Eraser selected"),
+        text = self:tr(_("Eraser selected")),
         timeout = 1,
     })
     return true
@@ -549,13 +549,13 @@ function Pencil:handleStylusSlot(input, slot)
             self.erasing = false
             self:cancelPendingRefresh()
             self:cancelColorPickerTimer()
-            self:startRawStroke()
             -- Record initial position and timestamp for color picker trigger
             local raw_x = slot.x or 0
             local raw_y = slot.y or 0
             local x, y = self:transformCoordinates(raw_x, raw_y)
             self.pen_x = x
             self.pen_y = y
+            self:startRawStroke(x, y)
             -- Only track picker state and schedule the 10Hz poll when the
             -- hold-pen-still gesture would actually produce something to
             -- show. Skipping these when both experimental pickers are off
@@ -622,13 +622,32 @@ function Pencil:teardownStylusCallback()
 end
 
 -- Start a new stroke from raw input
-function Pencil:startRawStroke()
+function Pencil:startRawStroke(first_x, first_y)
     local page = self:getCurrentPage()
     local tool = self.side_button_down and TOOL_HIGHLIGHTER or self.current_tool
     local tool_settings = self.tool_settings[tool] or self.tool_settings[TOOL_PEN]
 
     if self.side_button_down then
         self.side_button_used_for_highlight = true
+    end
+
+    -- Capture the view state at draw time so PDF export can map screen
+    -- coordinates back to exact page coordinates later, even if the user
+    -- scrolls/zooms away afterwards (plugin invariant: zoom/rotation must
+    -- stay fixed while drawing, but they may change BETWEEN sessions).
+    -- off_x/off_y = screen position of the page's (0,0) at this moment.
+    local zoom = 1
+    local off_x, off_y = 0, 0
+    if self.ui and self.ui.view and self.ui.view.state then
+        zoom = self.ui.view.state.zoom or 1
+    end
+    if first_x and first_y and self.ui and self.ui.view
+            and self.ui.view.screenToPageTransform then
+        local pp = self.ui.view:screenToPageTransform({ x = first_x, y = first_y })
+        if pp then
+            off_x = first_x - pp.x * zoom
+            off_y = first_y - pp.y * zoom
+        end
     end
 
     self.current_stroke = {
@@ -640,6 +659,9 @@ function Pencil:startRawStroke()
         color_name = tool_settings.color_name,
         alpha = tool_settings.alpha,
         datetime = os.time(),
+        zoom = zoom,
+        off_x = off_x,
+        off_y = off_y,
     }
     self.last_refresh_time = time.now()
     self.dirty_region = nil  -- Clear any pending dirty region
@@ -1064,22 +1086,77 @@ overlay a Vietnamese table when the user picks Tiếng Việt in the menu.
 Missing keys fall back to English, so partial translations stay safe.
 ]]
 local VI_STRINGS = {
+    -- Main menu
     ["Pencil"] = "Bút chì",
     ["Enabled"] = "Bật",
-    ["Swap Eraser and Highlighter"] = "Đổi vai Tẩy / Bút nhấn sáng",
+    ["Swap Eraser and Highlighter"] = "Đổi vai nút Tẩy / Bút dạ quang",
     ["Tool"] = "Công cụ",
+    ["Eraser"] = "Tẩy",
     ["Select pencil or eraser."] = "Chọn bút chì hoặc tẩy.",
+    ["Undo last stroke"] = "Hoàn tác nét vừa vẽ",
+    ["Clear page strokes"] = "Xoá nét của trang này",
+    ["Clear all strokes"] = "Xoá toàn bộ nét trong sách",
+    ["Export annotated PDF"] = "Xuất PDF kèm nét vẽ",
+    ["Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader."] = "Tạo bản sao PDF với mọi nét vẽ được ghi thành chú thích mực PDF thật. Chia sẻ, mở bằng trình đọc PDF nào cũng thấy.",
+    ["Language"] = "Ngôn ngữ",
+    -- Annotation images
+    ["Annotation images: none"] = "Ảnh chú thích: không có",
+    ["Annotation images: %1 KB"] = "Ảnh chú thích: %1 KB",
+    ["Annotation images: %1 MB"] = "Ảnh chú thích: %1 MB",
+    ["Saved preview images of your annotations are used to show what you wrote even after the device is rotated, and to preview annotations from the bookmark list. Tap to clear them for this book."] = "Ảnh xem trước dùng để hiển thị nét vẽ kể cả sau khi xoay máy, và xem nhanh từ danh sách bookmark. Chạm để xoá chúng cho sách này.",
+    -- Experimental
+    ["Experimental"] = "Tính năng thử nghiệm",
+    ["Bookmark sync"] = "Đồng bộ bookmark",
+    ["Automatically create KOReader bookmarks for pencil annotations so you can navigate to annotated pages from the Bookmarks menu."] = "Tự tạo bookmark KOReader cho chú thích bút chì, điều hướng nhanh từ menu Bookmark.",
+    ["Bookmark sync enabled. Pencil annotations will appear in the Bookmarks menu."] = "Đã bật đồng bộ bookmark. Chú thích sẽ xuất hiện trong menu Bookmark.",
+    ["Bookmark sync disabled. Pencil bookmarks removed."] = "Đã tắt đồng bộ bookmark. Bookmark của bút chì đã được xoá.",
+    ["Color picker"] = "Bảng chọn màu",
+    ["Allow the hold-pen-still gesture to open a picker for changing pen color (and, if the pen width picker is also enabled, stroke width). When disabled, the pen stays on its last-saved color."] = "Giữ bút đứng yên để mở bảng chọn màu (và độ dày nét nếu bật thêm). Khi tắt, bút giữ nguyên màu đã chọn.",
+    ["Color picker enabled. Hold the pen still to open it."] = "Đã bật bảng chọn màu. Giữ bút đứng yên để mở.",
+    ["Color picker disabled. Pen will keep its current color."] = "Đã tắt bảng chọn màu. Bút giữ nguyên màu hiện tại.",
+    ["Pen width picker"] = "Bảng chọn độ dày nét",
+    ["Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black bars whose height previews the stroke thickness. Requires the color picker to also be enabled."] = "Thêm lựa chọn độ dày nét (3, 5, 7, 9) vào bảng chọn màu. Nút độ dày hiển thị dạng thanh đen, chiều cao thể hiện độ dày. Cần bật bảng chọn màu trước.",
+    ["Pen width picker enabled. Hold the pen still to open the picker and choose a stroke width."] = "Đã bật bảng chọn độ dày. Giữ bút đứng yên để mở và chọn.",
+    ["Pen width picker disabled."] = "Đã tắt bảng chọn độ dày nét.",
+    ["Text highlight (side button)"] = "Gạch chân văn bản (nút bên)",
+    ["When enabled, holding the stylus side button during a pen drag creates a native KOReader text highlight on the underlying words, like a long-press \xe2\x86\x92 Highlight. Off by default because this is a new integration and has edge cases. Requires a stylus that sends BTN_STYLUS2."] = "Khi bật, giữ nút bên bút và kéo qua chữ sẽ tạo highlight văn bản KOReader như giữ ngón tay. Mặc định tắt vì tích hợp mới còn lỗi. Cần bút gửi tín hiệu BTN_STYLUS2.",
+    ["Text highlight enabled. Hold the side button while dragging the pen across words."] = "Đã bật. Giữ nút bên và kéo bút qua chữ.",
+    ["Text highlight disabled."] = "Đã tắt gạch chân văn bản.",
+    -- Debug
+    ["Input debug mode"] = "Chế độ gỡ lỗi đầu vào",
+    ["Input debug mode enabled.\n\nLog file: %1\n\nUse both pen tip and eraser end, then check the log."] = "Đã bật gỡ lỗi đầu vào. Log: %1. Dùng cả đầu bút và đầu tẩy rồi kiểm tra log.",
+    ["Enable detailed logging of input events to help diagnose stylus detection issues."] = "Ghi chi tiết sự kiện đầu vào để chẩn đoán lỗi nhận diện bút.",
+    ["Input debug mode disabled."] = "Đã tắt gỡ lỗi đầu vào.",
+    ["Clear debug log"] = "Xoá file log gỡ lỗi",
+    ["Debug log cleared. Ready to capture new input events."] = "Đã xoá log. Sẵn sàng ghi sự kiện mới.",
+    ["Show annotation status"] = "Hiện trạng thái chú thích",
+    -- Gestures (registered at init; language applies after restart)
+    ["Pencil: toggle on/off"] = "Bút chì: bật/tắt",
+    ["Pencil: toggle pencil/eraser"] = "Bút chì: đổi bút/tẩy",
+    ["Pencil: select pencil"] = "Bút chì: chọn bút",
+    ["Pencil: select eraser"] = "Bút chì: chọn tẩy",
+    ["Pencil: undo"] = "Bút chì: hoàn tác",
+    -- Status messages
+    ["Tool: %1"] = "Công cụ: %1",
     ["pencil"] = "bút chì",
     ["eraser"] = "tẩy",
-    ["Undo last stroke"] = "Hoàn tác nét vừa vẽ",
-    ["Clear page strokes"] = "Xoá nét trang hiện tại",
-    ["Clear all strokes"] = "Xoá mọi nét trong sách",
-    ["Export annotated PDF"] = "Xuất PDF có nét vẽ",
-    ["Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader."] = "Tạo bản sao PDF với mọi nét vẽ ghi thành ink annotation PDF thật. Chia sẻ mở bằng trình đọc PDF nào cũng thấy.",
-    ["Language"] = "Ngôn ngữ",
+    ["Pencil enabled"] = "Đã bật bút chì",
+    ["Pencil disabled"] = "Đã tắt bút chì",
+    ["Pencil tool: pencil"] = "Công cụ bút chì: bút",
+    ["Eraser selected"] = "Đã chọn tẩy",
+    ["Pen color: %1"] = "Màu bút: %1",
+    ["Pen width: %1"] = "Độ dày bút: %1",
+    ["Annotation - page %1"] = "Chú thích - trang %1",
+    ["Cleared %1 annotation(s) from page."] = "Đã xoá %1 chú thích khỏi trang.",
+    ["Cleared all annotation preview images for this book."] = "Đã xoá toàn bộ ảnh xem trước của sách này.",
+    ["No annotations found on this page."] = "Không có chú thích nào trên trang này.",
+    ["Annotation image is missing on disk."] = "Ảnh chú thích không còn trên bộ nhớ.",
+    ["No saved image for this annotation yet."] = "Chú thích này chưa có ảnh lưu.",
+    ["Yes"] = "Có",
+    ["No"] = "Không",
     ["Exported: %1"] = "Đã xuất: %1",
     ["Export failed (see crash.log)"] = "Xuất thất bại (xem crash.log)",
-    ["Only PDF documents can be exported."] = "Chỉ xuất được cho tài liệu PDF.",
+    ["Only PDF documents can be exported."] = "Chỉ xuất được tài liệu PDF.",
     ["No strokes to export."] = "Không có nét nào để xuất.",
 }
 
@@ -1162,33 +1239,48 @@ function Pencil:exportAnnotatedPdf()
         return
     end
 
-    local zoom = self.ui.view.state.zoom or 1
-    local origin = self.ui.view:screenToPageTransform({ x = 0, y = 0 }) or { x = 0, y = 0 }
-
+    local current_zoom = self.ui.view.state.zoom or 1
     local pages_done, pages_skipped = 0, 0
+    local legacy_used = false
     for pageno, page_stroke_list in pairs(self.page_strokes) do
         if type(pageno) == "number" and #page_stroke_list > 0 then
             local ok_page, page = pcall(doc._document.openPage, doc._document, pageno)
             if ok_page and page then
                 -- addInkAnnotation takes { { {x=,y=}, ... }, ... }: outer list
                 -- = separate strokes (each rendered as its own ink path).
+                -- Coordinate mapping (screen -> PDF page space, Y-down top-left
+                -- — the same space MuPDF's markup-annotation API already uses
+                -- for KOReader highlights):
+                --   pdf_pt = (screen_pt - off) / zoom
+                -- with off/zoom captured per-stroke at draw time (startRawStroke).
+                -- Legacy strokes without captured state fall back to the current
+                -- view transform, which is only correct for the page currently
+                -- displayed at the same zoom as when drawn.
                 local ink_strokes = {}
                 local meta = {}
                 for _, idx in ipairs(page_stroke_list) do
                     local stroke = self.strokes[idx]
                     if stroke and stroke.points and #stroke.points > 0 then
+                        local s_zoom, off_x, off_y = stroke.zoom, stroke.off_x, stroke.off_y
+                        if not s_zoom then legacy_used = true end
                         local pts = {}
                         for _, pt in ipairs(stroke.points) do
-                            table.insert(pts, {
-                                x = (pt.x + origin.x) / zoom,
-                                y = (pt.y + origin.y) / zoom,
-                            })
+                            local px, py
+                            if s_zoom then
+                                px = (pt.x - (off_x or 0)) / s_zoom
+                                py = (pt.y - (off_y or 0)) / s_zoom
+                            else
+                                local pp = self.ui.view:screenToPageTransform({ x = pt.x, y = pt.y })
+                                px = pp and pp.x or pt.x
+                                py = pp and pp.y or pt.y
+                            end
+                            table.insert(pts, { x = px, y = py })
                         end
                         table.insert(ink_strokes, pts)
                         local r, g, b = pencilGetRGB(stroke.color)
                         table.insert(meta, {
                             r = r, g = g, b = b,
-                            width = (stroke.width or 3) / zoom,
+                            width = (stroke.width or 3) / (s_zoom or current_zoom),
                             opacity = stroke.tool == TOOL_HIGHLIGHTER
                                 and (stroke.alpha or 128) / 255 or 1.0,
                         })
@@ -1207,6 +1299,9 @@ function Pencil:exportAnnotatedPdf()
             end
         end
     end
+    if legacy_used then
+        logger.warn("Pencil: export used current-view fallback for legacy strokes (no captured zoom/offset)")
+    end
 
     doc.is_edited = true -- PdfDocument:close() -> writeDocument(out)
     pcall(function() doc:close() end)
@@ -1223,9 +1318,9 @@ function Pencil:setTool(tool)
     self.current_tool = tool
     self:saveSettings()
     -- Show visual feedback with proper display name
-    local display_name = tool == TOOL_PEN and _("pencil") or _("eraser")
+    local display_name = tool == TOOL_PEN and self:tr(_("pencil")) or self:tr(_("eraser"))
     UIManager:show(InfoMessage:new{
-        text = T(_("Tool: %1"), display_name),
+        text = T(self:tr(_("Tool: %1")), display_name),
         timeout = 1,
     })
 end
@@ -1252,11 +1347,11 @@ end
 
 function Pencil:addToMainMenu(menu_items)
     menu_items.pencil_annotation = {
-        text = _("Pencil"),
+        text = self:tr(_("Pencil")),
         sorting_hint = "more_tools",
         sub_item_table = {
             {
-                text = _("Enabled"),
+                text = self:tr(_("Enabled")),
                 checked_func = function()
                     return self:isEnabled()
                 end,
@@ -1266,7 +1361,7 @@ function Pencil:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Swap Eraser and Highlighter"),
+                text = self:tr(_("Swap Eraser and Highlighter")),
                 checked_func = function()
                     return self.swap_eraser_and_highlighter
                 end,
@@ -1277,11 +1372,11 @@ function Pencil:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Tool"),
-                help_text = _("Select pencil or eraser."),
+                text = self:tr(_("Tool")),
+                help_text = self:tr(_("Select pencil or eraser.")),
                 sub_item_table = {
                     {
-                        text = _("Pencil"),
+                        text = self:tr(_("Pencil")),
                         checked_func = function()
                             return self.current_tool == TOOL_PEN
                         end,
@@ -1290,7 +1385,7 @@ function Pencil:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Eraser"),
+                        text = self:tr(_("Eraser")),
                         checked_func = function()
                             return self.current_tool == TOOL_ERASER
                         end,
@@ -1301,7 +1396,7 @@ function Pencil:addToMainMenu(menu_items)
                 },
             },
             {
-                text = _("Undo last stroke"),
+                text = self:tr(_("Undo last stroke")),
                 callback = function()
                     self:undoLastStroke()
                 end,
@@ -1311,7 +1406,7 @@ function Pencil:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Clear page strokes"),
+                text = self:tr(_("Clear page strokes")),
                 callback = function()
                     self:clearPageStrokes()
                 end,
@@ -1320,7 +1415,7 @@ function Pencil:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Clear all strokes"),
+                text = self:tr(_("Clear all strokes")),
                 callback = function()
                     self:clearAllStrokes()
                 end,
@@ -1329,8 +1424,8 @@ function Pencil:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Export annotated PDF"),
-                help_text = _("Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader."),
+                text = self:tr(_("Export annotated PDF")),
+                help_text = self:tr(_("Create a copy of this PDF with all pencil strokes burned in as real PDF ink annotations. Shareable with any PDF reader.")),
                 enabled_func = function()
                     return self.ui.paging ~= nil and #self.strokes > 0
                 end,
@@ -1340,7 +1435,7 @@ function Pencil:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Language"),
+                text = self:tr(_("Language")),
                 sub_item_table = {
                     {
                         text = "English",
@@ -1364,15 +1459,15 @@ function Pencil:addToMainMenu(menu_items)
                 text_func = function()
                     local bytes = self:getImagesSizeBytes()
                     if bytes <= 0 then
-                        return _("Annotation images: none")
+                        return self:tr(_("Annotation images: none"))
                     elseif bytes < 1024 * 1024 then
-                        return T(_("Annotation images: %1 KB"), math.floor(bytes / 1024))
+                        return T(self:tr(_("Annotation images: %1 KB")), math.floor(bytes / 1024))
                     else
-                        return T(_("Annotation images: %1 MB"),
+                        return T(self:tr(_("Annotation images: %1 MB")),
                             string.format("%.1f", bytes / (1024 * 1024)))
                     end
                 end,
-                help_text = _("Saved preview images of your annotations are used to show what you wrote even after the device is rotated, and to preview annotations from the bookmark list. Tap to clear them for this book."),
+                help_text = self:tr(_("Saved preview images of your annotations are used to show what you wrote even after the device is rotated, and to preview annotations from the bookmark list. Tap to clear them for this book.")),
                 keep_menu_open = true,
                 enabled_func = function()
                     return self:getImagesSizeBytes() > 0
@@ -1381,18 +1476,18 @@ function Pencil:addToMainMenu(menu_items)
                     self:purgeAllImages()
                     if touchmenu_instance then touchmenu_instance:updateItems() end
                     UIManager:show(InfoMessage:new{
-                        text = _("Cleared all annotation preview images for this book."),
+                        text = self:tr(_("Cleared all annotation preview images for this book.")),
                         timeout = 2,
                     })
                 end,
                 separator = true,
             },
             {
-                text = _("Experimental"),
+                text = self:tr(_("Experimental")),
                 sub_item_table = {
                     {
-                        text = _("Bookmark sync"),
-                        help_text = _("Automatically create KOReader bookmarks for pencil annotations so you can navigate to annotated pages from the Bookmarks menu."),
+                        text = self:tr(_("Bookmark sync")),
+                        help_text = self:tr(_("Automatically create KOReader bookmarks for pencil annotations so you can navigate to annotated pages from the Bookmarks menu.")),
                         checked_func = function()
                             return self.experimental_bookmark_sync
                         end,
@@ -1402,21 +1497,21 @@ function Pencil:addToMainMenu(menu_items)
                             if self.experimental_bookmark_sync then
                                 self:syncAllBookmarks()
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Bookmark sync enabled. Pencil annotations will appear in the Bookmarks menu."),
+                                    text = self:tr(_("Bookmark sync enabled. Pencil annotations will appear in the Bookmarks menu.")),
                                     timeout = 3,
                                 })
                             else
                                 self:removeAllPencilBookmarks()
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Bookmark sync disabled. Pencil bookmarks removed."),
+                                    text = self:tr(_("Bookmark sync disabled. Pencil bookmarks removed.")),
                                     timeout = 3,
                                 })
                             end
                         end,
                     },
                     {
-                        text = _("Color picker"),
-                        help_text = _("Allow the hold-pen-still gesture to open a picker for changing pen color (and, if the pen width picker is also enabled, stroke width). When disabled, the pen stays on its last-saved color."),
+                        text = self:tr(_("Color picker")),
+                        help_text = self:tr(_("Allow the hold-pen-still gesture to open a picker for changing pen color (and, if the pen width picker is also enabled, stroke width). When disabled, the pen stays on its last-saved color.")),
                         checked_func = function()
                             return self.experimental_color_picker
                         end,
@@ -1425,20 +1520,20 @@ function Pencil:addToMainMenu(menu_items)
                             self:saveSettings()
                             if self.experimental_color_picker then
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Color picker enabled. Hold the pen still to open it."),
+                                    text = self:tr(_("Color picker enabled. Hold the pen still to open it.")),
                                     timeout = 3,
                                 })
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Color picker disabled. Pen will keep its current color."),
+                                    text = self:tr(_("Color picker disabled. Pen will keep its current color.")),
                                     timeout = 2,
                                 })
                             end
                         end,
                     },
                     {
-                        text = _("Pen width picker"),
-                        help_text = _("Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black bars whose height previews the stroke thickness. Requires the color picker to also be enabled."),
+                        text = self:tr(_("Pen width picker")),
+                        help_text = self:tr(_("Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black bars whose height previews the stroke thickness. Requires the color picker to also be enabled.")),
                         checked_func = function()
                             return self.experimental_pen_width
                         end,
@@ -1447,20 +1542,20 @@ function Pencil:addToMainMenu(menu_items)
                             self:saveSettings()
                             if self.experimental_pen_width then
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Pen width picker enabled. Hold the pen still to open the picker and choose a stroke width."),
+                                    text = self:tr(_("Pen width picker enabled. Hold the pen still to open the picker and choose a stroke width.")),
                                     timeout = 3,
                                 })
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Pen width picker disabled."),
+                                    text = self:tr(_("Pen width picker disabled.")),
                                     timeout = 2,
                                 })
                             end
                         end,
                     },
                     {
-                        text = _("Text highlight (side button)"),
-                        help_text = _("When enabled, holding the stylus side button during a pen drag creates a native KOReader text highlight on the underlying words, like a long-press \xe2\x86\x92 Highlight. Off by default because this is a new integration and has edge cases. Requires a stylus that sends BTN_STYLUS2."),
+                        text = self:tr(_("Text highlight (side button)")),
+                        help_text = self:tr(_("When enabled, holding the stylus side button during a pen drag creates a native KOReader text highlight on the underlying words, like a long-press \xe2\x86\x92 Highlight. Off by default because this is a new integration and has edge cases. Requires a stylus that sends BTN_STYLUS2.")),
                         checked_func = function()
                             return self.experimental_text_highlight
                         end,
@@ -1469,12 +1564,12 @@ function Pencil:addToMainMenu(menu_items)
                             self:saveSettings()
                             if self.experimental_text_highlight then
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Text highlight enabled. Hold the side button while dragging the pen across words."),
+                                    text = self:tr(_("Text highlight enabled. Hold the side button while dragging the pen across words.")),
                                     timeout = 3,
                                 })
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Text highlight disabled."),
+                                    text = self:tr(_("Text highlight disabled.")),
                                     timeout = 2,
                                 })
                             end
@@ -1484,8 +1579,8 @@ function Pencil:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Input debug mode"),
-                help_text = _("Enable detailed logging of input events to help diagnose stylus detection issues."),
+                text = self:tr(_("Input debug mode")),
+                help_text = self:tr(_("Enable detailed logging of input events to help diagnose stylus detection issues.")),
                 checked_func = function()
                     return self.input_debug_mode
                 end,
@@ -1496,30 +1591,30 @@ function Pencil:addToMainMenu(menu_items)
                         -- Initialize debug logging
                         self:initDebugLog()
                         UIManager:show(InfoMessage:new{
-                            text = T(_("Input debug mode enabled.\n\nLog file: %1\n\nUse both pen tip and eraser end, then check the log."), self:getDebugLogPath()),
+                            text = T(self:tr(_("Input debug mode enabled.\n\nLog file: %1\n\nUse both pen tip and eraser end, then check the log.")), self:getDebugLogPath()),
                         })
                     else
                         UIManager:show(InfoMessage:new{
-                            text = _("Input debug mode disabled."),
+                            text = self:tr(_("Input debug mode disabled.")),
                         })
                     end
                 end,
             },
             {
-                text = _("Clear debug log"),
+                text = self:tr(_("Clear debug log")),
                 enabled_func = function()
                     return self.input_debug_mode
                 end,
                 callback = function()
                     self:clearDebugLog()
                     UIManager:show(InfoMessage:new{
-                        text = _("Debug log cleared. Ready to capture new input events."),
+                        text = self:tr(_("Debug log cleared. Ready to capture new input events.")),
                         timeout = 2,
                     })
                 end,
             },
             {
-                text = _("Show annotation status"),
+                text = self:tr(_("Show annotation status")),
                 callback = function()
                     self:showAnnotationStatus()
                 end,
@@ -1573,7 +1668,7 @@ Pages with strokes:%8]]),
         tostring(page),
         type(page),
         filepath,
-        self:isEnabled() and _("Yes") or _("No"),
+        self:isEnabled() and self:tr(_("Yes")) or self:tr(_("No")),
         pages_info,
         stylus_callback_status,
         tostring(pen_slot),
@@ -1636,7 +1731,7 @@ function Pencil:togglePenEraser()
 
     -- Show brief visual feedback
     UIManager:show(InfoMessage:new{
-        text = T(_("Tool: %1"), new_tool),
+        text = T(self:tr(_("Tool: %1")), new_tool),
         timeout = 0.5,
     })
 end
@@ -2514,7 +2609,7 @@ function Pencil:showColorPicker(x, y)
             if width_value then
                 plugin:setPenWidth(width_value)
                 UIManager:show(InfoMessage:new{
-                    text = T(_("Pen width: %1"), width_value),
+                    text = T(self:tr(_("Pen width: %1")), width_value),
                     timeout = 1,
                 })
                 return
@@ -2528,7 +2623,7 @@ function Pencil:showColorPicker(x, y)
             end
 
             UIManager:show(InfoMessage:new{
-                text = T(_("Pen color: %1"), color_name),
+                text = T(self:tr(_("Pen color: %1")), color_name),
                 timeout = 1,
             })
         end,
@@ -3529,7 +3624,7 @@ function Pencil:showGroupImagePreview(group)
     local path = self:getGroupImagePath(group)
     if not path then
         UIManager:show(InfoMessage:new{
-            text = _("No saved image for this annotation yet."),
+            text = self:tr(_("No saved image for this annotation yet.")),
             timeout = 2,
         })
         return
@@ -3537,7 +3632,7 @@ function Pencil:showGroupImagePreview(group)
     local attr = lfs.attributes(path)
     if not attr then
         UIManager:show(InfoMessage:new{
-            text = _("Annotation image is missing on disk."),
+            text = self:tr(_("Annotation image is missing on disk.")),
             timeout = 2,
         })
         return
@@ -3547,7 +3642,7 @@ function Pencil:showGroupImagePreview(group)
     UIManager:show(ImageViewer:new{
         file = path,
         with_title_bar = true,
-        title_text = T(_("Annotation - page %1"), pageno),
+        title_text = T(self:tr(_("Annotation - page %1")), pageno),
         fullscreen = false,
     })
 end
@@ -3812,7 +3907,7 @@ function Pencil:clearPageStrokes()
 
     if not indices_to_remove or #indices_to_remove == 0 then
         UIManager:show(InfoMessage:new{
-            text = _("No annotations found on this page."),
+            text = self:tr(_("No annotations found on this page.")),
             timeout = 1,
         })
         return
@@ -3842,7 +3937,7 @@ function Pencil:clearPageStrokes()
     self:saveStrokes()
 
     UIManager:show(InfoMessage:new{
-        text = T(_("Cleared %1 annotation(s) from page."), #deleted_strokes),
+        text = T(self:tr(_("Cleared %1 annotation(s) from page.")), #deleted_strokes),
         timeout = 1,
     })
     UIManager:setDirty(self.view, "ui")
@@ -4220,6 +4315,9 @@ function Pencil:strokeToSaveable(stroke)
         width = stroke.width,
         alpha = stroke.alpha,
         datetime = stroke.datetime,
+        zoom = stroke.zoom,
+        off_x = stroke.off_x,
+        off_y = stroke.off_y,
         points = stroke.points,
         color_name = stroke.color_name,  -- Save color name for persistence
     }
@@ -4249,6 +4347,9 @@ function Pencil:strokeFromSaved(saved)
         color_name = saved.color_name,
         alpha = saved.alpha or tool_settings.alpha,
         datetime = saved.datetime,
+        zoom = saved.zoom,
+        off_x = saved.off_x,
+        off_y = saved.off_y,
         points = saved.points,
     }
 end
