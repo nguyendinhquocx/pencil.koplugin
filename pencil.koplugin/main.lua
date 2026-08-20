@@ -403,7 +403,7 @@ function Pencil:handleStylusSlot(input, slot)
             local raw_x = slot.x or self.pen_x
             local raw_y = slot.y or self.pen_y
             local x, y = self:transformCoordinates(raw_x, raw_y)
-            local page = self:getCurrentPage()
+            local page = self:getPageAtScreen(x, y)
             local deleted = self:eraseAtPoint(x, y, page)
             if deleted then
                 for _, stroke in ipairs(deleted) do
@@ -489,7 +489,7 @@ function Pencil:handleStylusSlot(input, slot)
             local x, y = self:transformCoordinates(raw_x, raw_y)
             -- Erase on first touch OR when position changes
             if first_touch or x ~= self.pen_x or y ~= self.pen_y then
-                local page = self:getCurrentPage()
+                local page = self:getPageAtScreen(x, y)
                 if self.input_debug_mode then
                     self:writeDebugLog(string.format("ERASE ATTEMPT at (%d, %d) page=%s erasing=%s",
                         x, y, tostring(page), tostring(self.erasing)))
@@ -622,8 +622,33 @@ function Pencil:teardownStylusCallback()
 end
 
 -- Start a new stroke from raw input
+-- Resolve the page a screen point actually lands on.
+-- getCurrentPage() alone is WRONG in scroll mode: it reports the page at the
+-- top of the viewport (view.state.page), but in continuous scroll several
+-- pages are visible at once and the pen may be drawing on any of them.
+-- screenToPageTransform walks the visible page_states and returns the real
+-- page under the point (plus its page-space coords and zoom).
+-- Falls back to getCurrentPage() for rolling docs / unavailable transform.
+function Pencil:getPageAtScreen(x, y)
+    if x and y and self.ui and self.ui.view
+            and self.ui.view.screenToPageTransform then
+        local ok, pp = pcall(self.ui.view.screenToPageTransform, self.ui.view,
+            { x = x, y = y })
+        if ok and pp and pp.page ~= nil then
+            return pp.page, pp
+        end
+    end
+    return self:getCurrentPage()
+end
+
 function Pencil:startRawStroke(first_x, first_y)
-    local page = self:getCurrentPage()
+    local page
+    if first_x and first_y then
+        page = self:getPageAtScreen(first_x, first_y)
+    end
+    if page == nil then
+        page = self:getCurrentPage()
+    end
     local tool = self.side_button_down and TOOL_HIGHLIGHTER or self.current_tool
     local tool_settings = self.tool_settings[tool] or self.tool_settings[TOOL_PEN]
 
@@ -4299,6 +4324,13 @@ function Pencil:loadStrokes()
 
         self.strokes_loaded = true
         logger.info("Pencil: loaded", #self.strokes, "strokes from", filepath)
+        -- Strokes may load after the first paint (onReaderReady fires after the
+        -- reader view is already on screen); without a repaint they stay
+        -- invisible until the next page turn, which looks like "notes missing
+        -- when opening the book, appear later". Force a UI repaint now.
+        if UIManager and self.view then
+            UIManager:setDirty(self.view, "ui")
+        end
     else
         logger.warn("Pencil: failed to load strokes from", filepath, "error:", data)
         self.strokes = {}
