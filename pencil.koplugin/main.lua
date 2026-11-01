@@ -1510,7 +1510,10 @@ end
 
 -- Handle stylus button and tool events
 function Pencil:onKeyPress(key)
-    local key_str = tostring(key)
+    -- Some Kobo key/Event objects have a __tostring that errors on nil fields;
+    -- guard so a stray key event can't abort this handler mid-eraser-gesture.
+    local ok_str, key_str = pcall(tostring, key)
+    if not ok_str then key_str = "" end
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
@@ -1559,7 +1562,8 @@ function Pencil:onKeyPress(key)
 end
 
 function Pencil:onKeyRelease(key)
-    local key_str = tostring(key)
+    local ok_str, key_str = pcall(tostring, key)
+    if not ok_str then key_str = "" end
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
